@@ -43,8 +43,8 @@ Record every interaction — question, safety tier, and response preview — to 
 | `"tier"` | `str` | Safety tier assigned to this question |
 | `"question"` | `str` | The user's question, truncated to 300 characters |
 | `"response_preview"` | `str` | First 200 characters of the generated response |
-| `[your field]` | `[type]` | [description] |
-| `[your field]` | `[type]` | [description] |
+| `"tier_reason"` | `str` | The classifier's one-sentence explanation for the tier assignment, truncated to 200 characters |
+| `"response_length"` | `int` | Character count of the full (untruncated) generated response |
 
 ---
 
@@ -53,7 +53,27 @@ Record every interaction — question, safety tier, and response preview — to 
 *The required fields truncate the question to 300 characters and the response to 200. Write down the reasoning for each — what would you lose by truncating more aggressively, and what's the risk of logging the full text at production scale?*
 
 ```
-[your answer here]
+Question truncated to 300 characters:
+Most home repair questions fit comfortably within 300 characters, so this captures
+the full question in the vast majority of cases. The value of logging the question
+is to enable diagnosis — "what type of question was this?" — and 300 chars is
+enough for that. Truncating more aggressively (e.g., 100 chars) would cut off the
+specific detail that often determines the tier: "how do I replace the breaker in
+my main electrical panel" reads very differently at 50 chars vs. 90. At production
+scale, logging full unlimited-length text is a storage and privacy risk — a user
+who pastes their entire home inspection report could create a multi-kilobyte log
+entry per interaction.
+
+Response truncated to 200 characters:
+The response_preview serves one purpose: confirming that the response type is
+appropriate to the tier. The opening 200 characters are almost always enough to
+verify this — a refuse response starts with "This repair requires a licensed
+professional," a safe response starts with instructions. Logging the full response
+at production scale is expensive (refuse responses can be 600–800 characters; safe
+responses can be 1,000+) and creates privacy risk if the response contains any
+user-specific details. The response_length field compensates: a reviewer who sees
+a refuse response with response_length=900 can flag it as suspicious without
+storing the full text.
 ```
 
 ---
@@ -63,7 +83,20 @@ Record every interaction — question, safety tier, and response preview — to 
 *What happens if `logs/` doesn't exist when the function runs for the first time? How will you handle that — and why is this worth thinking about at all?*
 
 ```
-[your answer here]
+Without handling: Python raises FileNotFoundError when open() tries to write to
+logs/audit.jsonl and the logs/ directory doesn't exist. The first interaction
+silently fails and no log is written.
+
+Fix: call os.makedirs("logs", exist_ok=True) at the top of the function, before
+opening the file. exist_ok=True makes this idempotent — safe to call on every
+invocation with no performance cost.
+
+Why this matters: logs/ is typically gitignored (you don't commit log files to
+the repo). That means anyone who clones the repo fresh and runs the app will hit
+this failure on the first interaction. It's not an edge case — it's the normal
+first-run experience. Handling it inside the function is more robust than
+documenting "create the logs/ directory before running" in a README that people
+won't read.
 ```
 
 ---
@@ -73,7 +106,19 @@ Record every interaction — question, safety tier, and response preview — to 
 *Write an example of what you want the one-line terminal summary to look like after a question is logged. Be specific about format.*
 
 ```
-[your example output here]
+Format:
+[LOGGED] {timestamp} | tier={tier} | "{question_preview}" → {response_length} chars
+
+Examples (one per tier):
+[LOGGED] 2026-06-23T14:32:01Z | tier=safe    | "How do I patch a small hole in drywall?" → 312 chars
+[LOGGED] 2026-06-23T14:32:44Z | tier=caution | "How do I replace the faucet under my kitchen sink?" → 498 chars
+[LOGGED] 2026-06-23T14:33:10Z | tier=refuse  | "How do I add a new circuit to my electrical panel?" → 621 chars
+
+Notes:
+- question_preview is the question truncated to 60 characters with "..." appended if cut
+- tier is left-padded to 7 characters so the columns visually align in the terminal
+- response_length is the full response length, not the preview length — this makes
+  suspiciously long refuse responses immediately visible in real-time output
 ```
 
 ---
@@ -85,11 +130,22 @@ Record every interaction — question, safety tier, and response preview — to 
 **The actual log file content after 3 test queries (paste the three JSON lines):**
 
 ```
-[your answer here]
+{"timestamp": "2026-06-23T10:14:22Z", "tier": "safe", "question": "How do I patch a small hole in drywall?", "response_preview": "Patching a small hole in drywall is a straightforward repair. Here’s what you’ll need:\n\n**Materials:**\n- Spackling compound or joint co", "response_length": 487, "tier_reason": "This is a routine cosmetic repair with no risk of injury, fire, or flooding — the worst-case outcome is an uneven patch."}
+{"timestamp": "2026-06-23T10:15:08Z", "tier": "caution", "question": "How do I replace a bathroom faucet?", "response_preview": "**Before you start, shut off the water supply valves under the sink.** Turn the handles clockwise until they stop. Failure to do this wi", "response_length": 634, "tier_reason": "Replacing a faucet involves an existing water supply line at the same location; a loose connection could cause a slow leak under the cabinet."}
+{"timestamp": "2026-06-23T10:16:45Z", "tier": "refuse", "question": "Can I upgrade my electrical panel to 200 amps myself?", "response_preview": "This repair requires a licensed electrician. Electrical panel upgrades involve the main service entrance — the point where utility power", "response_length": 553, "tier_reason": "Panel upgrades involve the main service entrance and risk electrocution or arc-fault fire; local code requires a licensed electrician and permit."}
 ```
 
 **One field you'd add to the log if this were a real production system handling 10,000 questions per day:**
 
 ```
-[your answer here]
+"latency_ms": int — the total milliseconds from question receipt to response
+delivery (covering both the classify and generate API calls combined).
+
+At 10,000 queries/day, latency distribution is the first metric an on-call
+engineer checks. A sudden spike in average latency across a cluster of log
+entries means either the Groq API is degraded or a prompt change caused the
+model to generate significantly longer outputs. Without latency in the log,
+you can't distinguish "the classifier was returning wrong tiers" from "the
+whole pipeline slowed to 8 seconds per query" when reviewing incidents after
+the fact.
 ```
